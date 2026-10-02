@@ -14,9 +14,12 @@
 ├── frontend/                 Vue 3 + Vite + TypeScript 前端（唯一运行单元）
 │   ├── src/views/            每个业务模块一个页面
 │   ├── src/api/local-service.ts   本地数据服务：列表、筛选、动作流转、导出
-│   ├── src/data/             模块元数据 / 示例数据 / localStorage 持久化
+│   ├── src/domain/audit.ts        共用审核规则：状态机、汇总口径、并发闸门
+│   ├── src/data/             模块元数据 / 示例数据 / localStorage 持久化 / 旧记录迁移
+│   ├── scripts/doctor.mjs    本地与构建共用的检查脚本（示例数据 / 迁移 / 并发 / 待办同步）
 │   ├── src/stores/           会话与筛选状态
 │   └── vite.config.ts        dev server 配置（open: false，无 /api 代理）
+├── Makefile                  install / check / frontend / build 统一入口
 ├── .gitignore
 └── docker-compose.yml
 ```
@@ -27,6 +30,16 @@
 cd frontend
 npm install
 npm run dev
+```
+
+`npm run dev` 会先跑一遍 `npm run doctor`（本地检查），通过后才启动 dev server；
+`npm run build` 同样把检查、类型检查、生产构建串在一条流程里。也可以单独执行：
+
+```bash
+npm run doctor      # 示例数据 / 旧记录迁移 / 并发互斥 / 复核待办同步 共 11 项检查
+# 或在仓库根目录
+make check          # 同 doctor
+make build          # doctor + 类型检查 + 生产构建
 ```
 
 前端默认监听 `http://127.0.0.1:5173/`，dev server 不会自动打开浏览器，需要自己访问。
@@ -69,3 +82,28 @@ npm run build
   `frontend/src/data/seed.ts`。
 - 状态流转只允许在 `local-service.ts` 里改，页面组件不做业务判断。
 - 想回到初始数据：清掉浏览器里 `forest-fire-patrol:entries` 这一项，或调用 `resetModule(模块)`。
+
+## 林木生长共用审核规则
+
+林木生长记录的审核、复核、归档只有一份规则，集中在 `frontend/src/domain/audit.ts`，
+页面动作、看板汇总、示例数据与旧记录迁移全部从它取口径：
+
+- 状态机：`已录入 →提交审核→ 已审核`；`已审核 →要求复核→ 需复核`；
+  `需复核 →采纳现场结论→ 已审核`；`已审核 →确认记录→ 已归档`。已归档为终态，不可再操作。
+- 冲突时以现场调查结论为准：复核有异议时不覆盖现场结论，而是走「采纳现场结论」落回已审核。
+- 历史林分类型按当时标准保留：迁移与任何流转都不改写「林分类型」字段。
+- 汇总口径唯一：样地数量按「样地编号」去重（同一样地多次调查只算一个），待审核 / 复核待办 /
+  已归档 / 本月录入（按调查日期）都由 `auditMetrics` 计算，页面不再各 filter 一遍；
+  新规则落地后，林木生长页与运营概览通过 `subscribeRows` 订阅同步刷新（含跨标签页）。
+- 并发互斥：`runAuditAction` 要求调用方带上发起动作时所见的状态，落库前比对最新状态，
+  并经同记录并发闸门串行化；「提交审核」与「要求复核」同时发生时只允许一个状态落地，
+  另一方收到冲突提示。
+
+## 本地数据版本与旧记录迁移
+
+- 本地存储结构带版本号（`DATA_SCHEMA_VERSION`，见 `frontend/src/data/migration.ts`）。
+- 打开应用时自动识别旧版裸结构并迁移：旧状态同义写法（如「复核中」「已封存」）归一到现行状态，
+  未知状态回退「已录入」重走流程；`pending/abnormal` 按共用规则重算；迁移结果立即写回。
+- 迁移只补结构与派生标记，**不动林分类型等现场字段**；示例数据新增的行会补齐，浏览器中
+  已有的记录原样保留。
+- `npm run doctor` 把示例数据自检与迁移自检纳入同一条本地/构建流程。

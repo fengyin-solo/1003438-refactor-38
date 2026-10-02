@@ -18,6 +18,10 @@ export type ModuleMeta = {
   actions: string[]
   actionTargets: Record<string, string>
   metrics: string[]
+  /** 走共用审核规则（录入/审核/复核/归档状态机）的模块。 */
+  auditFlow?: boolean
+  /** 去重统计样地数量使用的字段名。 */
+  plotField?: string
 }
 
 export type PageResult = {

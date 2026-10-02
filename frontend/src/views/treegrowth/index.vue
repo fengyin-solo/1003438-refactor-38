@@ -18,6 +18,10 @@
       </article>
     </div>
 
+    <p v-if="summary.recheckCount > 0" class="recheck-banner">
+      现有 {{ summary.recheckCount }} 条记录等待复核，冲突以现场调查结论为准，复核通过后执行「采纳现场结论」。
+    </p>
+
     <p class="status-legend">
       <span v-for="item in statusSummary" :key="item.status" class="legend-item">
         {{ item.status }}：{{ item.count }}
@@ -47,14 +51,16 @@
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in actionsForRow(meta, row)"
               :key="action"
               class="link"
+              :disabled="busyId === Number(row.id)"
               type="button"
               @click="runAction(action, row)"
             >
               {{ action }}
             </button>
+            <span v-if="!actionsForRow(meta, row).length" class="muted">已归档封存</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -64,40 +70,60 @@
     </table>
 
     <footer class="page-foot">
-      <span>共 {{ total }} 条林木生长记录</span>
+      <span>共 {{ total }} 条林木生长记录 · {{ summary.plotCount }} 个样地（按样地编号去重）</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import {
+  actionsForRow,
   downloadEntries,
   listEntries,
   moduleMeta,
-  runAction as applyAction,
+  runAuditAction as applyAction,
+  treegrowthSummary,
 } from '@/api/local-service'
+import { subscribeRows } from '@/data/local-store'
+import { AUDIT_STATUSES, auditStatusCounts, type AuditMetrics } from '@/domain/audit'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('treegrowth')
-const columns = ["记录编号", "样地编号", "林分类型", "平均胸径", "平均树高", "郁闭度", "调查员", "记录状态"]
-const actions = ["提交审核", "确认记录", "要求复核"]
-const statuses = ["已录入", "已审核", "需复核", "已归档"]
-const stats = [{"label": "样地数量", "value": 0}, {"label": "待审核记录", "value": 0}, {"label": "本月录入", "value": 0}]
+// 列、筛选项与模块元数据同源，不再在页面里各写一份。
+const columns = meta.fields
+const filterFields = meta.fields.slice(0, 3)
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const busyId = ref<number | null>(null)
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
-const statusSummary = computed(() =>
-  statuses.map((status: string) => ({
-    status,
-    count: rows.value.filter((row) => String(row.status) === status).length,
-  })),
-)
+
+// 全部汇总数量只认共用规则这一份：卡片、图例、页脚一起消费。
+const summary = ref<AuditMetrics>(treegrowthSummary())
+
+const stats = computed(() => [
+  { label: '样地数量', value: summary.value.plotCount },
+  { label: '待审核记录', value: summary.value.pendingReview },
+  { label: '复核待办', value: summary.value.recheckCount },
+  { label: '已归档', value: summary.value.archivedCount },
+  { label: '本月录入', value: summary.value.monthEntered },
+])
+
+const statusSummary = computed(() => {
+  // 图例同样走共用规则，只是作用域为筛选后的行。
+  const counts = auditStatusCounts(rows.value)
+  return AUDIT_STATUSES.map((status) => ({ status, count: counts[status] }))
+})
+
+// 数据在任何入口被改动（含其它标签页），复核待办与统计同步更新。
+const unsubscribe = subscribeRows(() => {
+  summary.value = treegrowthSummary()
+})
+onUnmounted(unsubscribe)
 
 function resetFilters() {
   filters.value = {}
@@ -112,14 +138,22 @@ function openCreate() {
   errorMessage.value = '林木生长记录登记入口尚未接入审批流'
 }
 
-function runAction(action: string, row: EntryRow) {
+async function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
-  const result = applyAction(meta.key, Number(row.id), action)
-  if (!result.ok) {
-    errorMessage.value = result.message
-    return
+  const id = Number(row.id)
+  busyId.value = id
+  try {
+    // expectedStatus 是点击时该行展示的状态，落库前比对最新状态：
+    // 提交审核与要求复核并发时，后到的一方因状态已被改写而被拒绝，只落一个状态。
+    const result = await applyAction(meta.key, id, action, String(row.status))
+    if (!result.ok) {
+      errorMessage.value = result.message
+      return
+    }
+    reload()
+  } finally {
+    busyId.value = null
   }
-  reload()
 }
 
 function reload() {
@@ -128,6 +162,7 @@ function reload() {
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
+    summary.value = treegrowthSummary()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '林木生长列表读取失败'
   }
@@ -135,3 +170,22 @@ function reload() {
 
 onMounted(reload)
 </script>
+
+<style scoped>
+.recheck-banner {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #fff4e5;
+  color: #9a5b00;
+}
+
+.muted {
+  color: #999;
+}
+
+.link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+</style>

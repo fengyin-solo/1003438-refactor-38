@@ -1,5 +1,15 @@
 import { MODULE_BY_KEY } from '@/data/modules'
 import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
+import {
+  auditMetrics,
+  auditTargetOf,
+  availableAuditActions,
+  canTransition,
+  isAbnormalStatus,
+  isPendingStatus,
+  rejectAudit,
+  runAuditTransition,
+} from '@/domain/audit'
 import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
 
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
@@ -28,13 +38,81 @@ export function listEntries(key: string, filters: Record<string, string> = {}): 
   return { items: matched, total: matched.length, page: 1, size: matched.length }
 }
 
+function applyAuditAction(
+  meta: ModuleMeta,
+  id: number,
+  action: string,
+  expectedStatus: string,
+): ActionResult {
+  const rows = listRows(meta.key)
+  const index = rows.findIndex((row) => Number(row.id) === id)
+  if (index < 0) {
+    return { ok: false, message: `没有找到编号为 ${id} 的${meta.entity}` }
+  }
+  // 乐观并发校验：以发起动作时页面所见状态为准，落库前比对最新状态。
+  // 提交审核与要求复核基于同一状态并发时，后落地的一方会发现状态已被改写，直接拒绝。
+  const latestStatus = String(rows[index].status)
+  if (latestStatus !== expectedStatus) {
+    return {
+      ok: false,
+      message: `该记录状态已被另一个审核动作更新为「${latestStatus}」，本次「${action}」未生效`,
+    }
+  }
+  if (!canTransition(latestStatus, action)) {
+    return rejectAudit(meta, latestStatus, action)
+  }
+  const target = auditTargetOf(action) as string
+  const updated: EntryRow = {
+    ...rows[index],
+    status: target,
+    pending: isPendingStatus(target),
+    abnormal: isAbnormalStatus(target),
+  }
+  const next = [...rows]
+  next[index] = updated
+  saveRows(meta.key, next)
+  return { ok: true, message: `${meta.entity}已${action}，当前状态「${target}」` }
+}
+
+/**
+ * 审核流动作入口（异步）：
+ * - 调用方必须传 expectedStatus（点击按钮时该行展示的状态）；
+ * - 并发闸门保证同一条记录同一时刻只有一个审核动作在落地；
+ * - 闸门内再按最新状态做乐观校验，双保险保证「提交审核 / 要求复核」并发时只落一个状态。
+ */
+export async function runAuditAction(
+  key: string,
+  id: number,
+  action: string,
+  expectedStatus: string,
+): Promise<ActionResult> {
+  const meta = moduleMeta(key)
+  if (!meta.auditFlow) {
+    return runAction(key, id, action)
+  }
+  if (!auditTargetOf(action)) {
+    return rejectAudit(meta, expectedStatus, action)
+  }
+  const gated = await runAuditTransition(key, id, action, () =>
+    applyAuditAction(meta, id, action, expectedStatus),
+  )
+  if (!gated.ok) {
+    return gated.conflict as ActionResult
+  }
+  return gated.result as ActionResult
+}
+
 export function runAction(key: string, id: number, action: string): ActionResult {
   const meta = moduleMeta(key)
+  return runGenericAction(meta, id, action)
+}
+
+function runGenericAction(meta: ModuleMeta, id: number, action: string): ActionResult {
   const target = meta.actionTargets[action]
   if (!target) {
     return { ok: false, message: `${meta.entity}没有登记「${action}」这个动作` }
   }
-  const rows = listRows(key)
+  const rows = listRows(meta.key)
   const index = rows.findIndex((row) => Number(row.id) === id)
   if (index < 0) {
     return { ok: false, message: `没有找到编号为 ${id} 的${meta.entity}` }
@@ -52,8 +130,21 @@ export function runAction(key: string, id: number, action: string): ActionResult
   }
   const next = [...rows]
   next[index] = updated
-  saveRows(key, next)
+  saveRows(meta.key, next)
   return { ok: true, message: `${meta.entity}已${action}，当前状态「${target}」` }
+}
+
+/** 规则驱动：页面按行渲染当前状态允许的动作，未接入审核流的模块返回动作全集。 */
+export function actionsForRow(meta: ModuleMeta, row: EntryRow): string[] {
+  if (meta.auditFlow) {
+    return availableAuditActions(row)
+  }
+  return meta.actions
+}
+
+/** 林木生长的共用汇总口径：样地去重、待审核、复核待办、归档、本月录入。 */
+export function treegrowthSummary(): ReturnType<typeof auditMetrics> {
+  return auditMetrics(listRows('treegrowth'))
 }
 
 export function resetModule(key: string): PageResult {
@@ -68,7 +159,7 @@ export function exportEntries(key: string): { filename: string; content: string 
   for (const row of listRows(key)) {
     lines.push([row.id, ...meta.fields.map((field) => row[field] ?? ''), row.status].join(','))
   }
-  return { filename: `${meta.name}-清单.csv`, content: `\uFEFF${lines.join('\n')}` }
+  return { filename: `${meta.name}-清单.csv`, content: `﻿${lines.join('\n')}` }
 }
 
 export function downloadEntries(key: string): void {
@@ -88,6 +179,16 @@ export function loadOverview(): OverviewResult {
   const rows = allRows()
   const modules = [...MODULE_BY_KEY.values()].map((meta) => {
     const entries = rows[meta.key] ?? []
+    if (meta.auditFlow) {
+      // 待处理 = 待审核 + 复核待办；异常量 = 复核待办。口径来自共用审核规则。
+      const metrics = auditMetrics(entries)
+      return {
+        name: meta.name,
+        created: entries.length,
+        pending: metrics.pendingReview + metrics.recheckCount,
+        abnormal: metrics.recheckCount,
+      }
+    }
     return {
       name: meta.name,
       created: entries.length,

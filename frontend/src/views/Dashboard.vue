@@ -35,9 +35,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 
 import { loadOverview } from '@/api/local-service'
+import { subscribeRows } from '@/data/local-store'
 import type { OverviewResult } from '@/data/types'
 
 const cards = ref<OverviewResult['cards']>([])
@@ -48,6 +49,10 @@ function refresh() {
   cards.value = payload.cards
   moduleRows.value = payload.modules
 }
+
+// 任一入口落了审核/复核动作（含其它标签页），待处理与异常量同步刷新。
+const unsubscribe = subscribeRows(refresh)
+onUnmounted(unsubscribe)
 
 onMounted(refresh)
 </script>
