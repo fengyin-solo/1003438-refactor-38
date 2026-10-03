@@ -21,22 +21,45 @@
 └── docker-compose.yml
 ```
 
-## 启动
+## 启动与检查（同一套流程）
 
 ```bash
-cd frontend
-npm install
-npm run dev
+make install     # 安装依赖（准备本地开发环境）
+make dev         # 启动本地开发服务器 http://127.0.0.1:5173/
+make verify      # 只跑业务校验：审核状态机 / 并发 CAS / 旧记录迁移 / 复核待办
+make build       # 类型检查 + 生产构建
+make check       # 一条命令跑完：类型检查 + 业务校验 + 生产构建
 ```
 
-前端默认监听 `http://127.0.0.1:5173/`，dev server 不会自动打开浏览器，需要自己访问。
+`make check` 等价于 `cd frontend && npm run check`，本地开发、CI、示例数据验证与旧记录迁移
+校验都走这一条链路。前端默认监听 `http://127.0.0.1:5173/`，dev server 不会自动打开浏览器。
 
-生产构建：
+## 林木生长：共用审核规则
 
-```bash
-cd frontend
-npm run build
-```
+林木生长记录的审核、复核、归档不再分散在各动作入口里判断，统一收敛在
+`frontend/src/domain/review.ts`：
+
+- 状态机：`已录入 --提交审核--> 已审核`；`已审核 --确认记录--> 已归档`；
+  `已审核 --要求复核--> 需复核`；`需复核 --提交审核--> 已审核`。`已归档` 为终态。
+- 页面只渲染当前状态允许的动作（`availableActions`），不允许跳状态（例如已录入不能直接归档）。
+- 复核后再提交**必须登记现场调查结论**；室内审核与现场调查冲突时，**以现场调查结论为准**。
+- **历史林分类型按当时标准原样保留**，迁移和流转都不做新旧标准映射或改写。
+- 样地数量按「样地编号」去重、本月录入按「调查日期」统计；页面指标、运营概览、侧栏角标
+  全部取 `summarizeReview` 的同一份结果，不再各算一遍。
+- 每条记录带 `rev` 乐观锁版本：提交审核与要求复核（或归档）并发时，只有持有最新 `rev`
+  的动作能落地，另一个返回 `conflict`，页面提示刷新后重试。
+- 任意入口的状态流转都会经数据层变更事件推送到 Pinia 复核待办 store
+  （`frontend/src/stores/review.ts`），运营概览、侧栏角标与林木生长页面实时同步。
+
+## 本地数据迁移
+
+localStorage 数据带 schema 版本号（见 `frontend/src/data/migrations.ts`）：
+
+- 首次打开播种当前版本示例数据（`seed.ts`），种子数据同样经过规范化，不存在两套口径。
+- 老用户浏览器里的旧记录启动时按版本顺序自动迁移（v1→v2：补调查日期/调查结论、rev，
+  按共用规则重算待办；历史林分类型原样保留），迁移结果写回当前版本结构。
+
+想回到初始数据：清掉浏览器里 `forest-fire-patrol:entries` 这一项，或调用 `resetModule(模块)`。
 
 ## 业务模块
 
@@ -67,5 +90,6 @@ npm run build
   `frontend/src/api/local-service.ts`。
 - 字段、状态、动作与流转目标集中在 `frontend/src/data/modules.ts`；示例数据在
   `frontend/src/data/seed.ts`。
-- 状态流转只允许在 `local-service.ts` 里改，页面组件不做业务判断。
-- 想回到初始数据：清掉浏览器里 `forest-fire-patrol:entries` 这一项，或调用 `resetModule(模块)`。
+- 普通模块的状态流转只允许在 `local-service.ts` 里改；挂了 `review` 配置的模块（林木生长）
+  改由 `frontend/src/domain/review.ts` 的共用审核状态机判定，页面组件不做业务判断。
+- 业务规则变更后运行 `make verify`，提交前运行 `make check`。

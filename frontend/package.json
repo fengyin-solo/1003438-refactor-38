@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "verify": "node scripts/run-verify.mjs",
+    "check": "npm run typecheck && npm run verify && npm run build"
   },
   "dependencies": {
     "pinia": "^2.1.7",

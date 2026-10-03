@@ -4,7 +4,8 @@
       <h1 class="app-title">森林防火巡护管理系统</h1>
       <nav class="nav-list">
         <RouterLink v-for="item in navItems" :key="item.path" :to="item.path" class="nav-item">
-          {{ item.label }}
+          <span>{{ item.label }}</span>
+          <span v-if="todoBadge(item.path)" class="nav-badge">{{ todoBadge(item.path) }}</span>
         </RouterLink>
       </nav>
     </aside>
@@ -20,8 +21,21 @@
 
 <script setup lang="ts">
 import { useSessionStore } from '@/stores/session'
+import { useReviewStore } from '@/stores/review'
 
 const store = useSessionStore()
+const reviewStore = useReviewStore()
+reviewStore.bind()
 
 const navItems = [{ label: "运营概览", path: "/" }, { label: "巡护任务", path: "/patrol" }, { label: "火险监测", path: "/firewatch" }, { label: "瞭望台管理", path: "/lookout" }, { label: "防火隔离带", path: "/firebreak" }, { label: "扑火队伍", path: "/fireteam" }, { label: "消防装备", path: "/equipment" }, { label: "气象观测", path: "/weather" }, { label: "火情报告", path: "/firereport" }, { label: "无人机巡查", path: "/drone" }, { label: "防火宣传", path: "/campaign" }, { label: "防火检查站", path: "/checkpoint" }, { label: "值勤排班", path: "/duty" }, { label: "物资储备", path: "/supply" }, { label: "林区道路", path: "/forestroad" }, { label: "防火林带", path: "/firebelt" }, { label: "应急演练", path: "/drill" }, { label: "焚烧审批", path: "/burnpermit" }, { label: "林木生长", path: "/treegrowth" }]
+
+// 路由 path 形如 /treegrowth，与审核待办的模块 key 对应；数字 0 不显示角标。
+function todoBadge(path: string): number {
+  const key = path.replace(/^\//, '')
+  const todo = reviewStore.todos.find((item) => item.key === key)
+  if (!todo) {
+    return 0
+  }
+  return todo.awaitingReview + todo.awaitingRecheck
+}
 </script>
